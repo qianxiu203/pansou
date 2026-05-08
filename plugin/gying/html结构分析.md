@@ -184,6 +184,27 @@ GET {baseURL}/mv/wkMn
 - 页面标题或正文出现 `未登录，访问受限`
 - 详情 JSON 里的 `code == 403`
 
+### Cookie 生命周期
+
+当前站点至少有两类不同作用的 Cookie：
+
+- 登录态 Cookie：例如 `PHPSESSID`、`app_auth`
+- 验证态 Cookie：例如 `browser_verified`
+
+两者不是同一层状态：
+
+- 只有登录态，没有验证态：搜索时仍可能进入“浏览器安全验证”
+- 只有验证态，没有有效登录态：搜索可能不再 challenge，但会落到 `nologin`
+
+当前插件的处理链路是：
+
+1. 登录 / 重登成功后，导出整套 Cookie 快照并保存到用户文件
+2. 搜索过程中如果 challenge 求解成功，服务端补发的 `browser_verified` 会进入 scraper 的 cookie jar
+3. 单次搜索成功后，插件会把 scraper 中最新 Cookie 再次导出并回写到用户文件
+4. 插件重启后，优先使用已保存 Cookie 恢复 scraper 会话；只有恢复失败时才回退到用户名密码重新登录
+
+这样做的目的，是尽量复用已经通过的浏览器验证结果，减少不必要的重复 challenge。
+
 ## 4. 搜索页 HTML 结构
 
 ### 搜索地址

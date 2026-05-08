@@ -314,6 +314,14 @@ curl -X POST "http://localhost:8888/gying/{hash}" \
 
 插件会进入 `solveBotChallenge` 自动求解后再重试原请求。
 
+验证通过后，站点通常会下发 `browser_verified` 这类验证态 Cookie。当前插件会：
+
+- 在登录阶段导出并保存当前 Cookie 快照
+- 在搜索阶段如果拿到新的验证态 Cookie，会自动回写到用户文件
+- 在插件重启后优先使用已保存 Cookie 恢复会话，而不是默认先重登
+
+这一步的目的是尽量复用浏览器验证结果，减少重复触发 challenge。
+
 ### 2. 搜索链路不是单接口
 
 当前搜索逻辑不是直接调一个公开 API，而是：
@@ -359,6 +367,24 @@ curl -X POST "http://localhost:8888/gying/{hash}" \
 2. 进入 hash 页面后先配置站点地址
 3. 再登录账号
 4. 最后再使用 `test_search` 或正式搜索
+
+### Cookie 生命周期
+
+当前 `gying` 的会话至少包含两类状态：
+
+- 登录态 Cookie：例如 `PHPSESSID`、`app_auth`
+- 验证态 Cookie：例如 `browser_verified`
+
+两者作用不同：
+
+- 没有登录态，搜索可能直接进入 `nologin`
+- 没有验证态，即使已登录，也可能先进入“浏览器安全验证”
+
+当前插件的处理链路是：
+
+1. 登录或重登时保存完整 Cookie 快照
+2. 搜索过程中如果站点补发新的验证态 Cookie，会同步回写到 `cache/gying_users/{hash}.json`
+3. 插件重启后优先恢复这份 Cookie 快照，以复用验证结果
 
 ### 环境变量（可选）
 

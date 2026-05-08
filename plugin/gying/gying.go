@@ -855,8 +855,8 @@ func (p *GyingPlugin) SearchWithResult(keyword string, ext map[string]interface{
 
 // ============ 用户管理 ============
 
-// loadAllUsers 加载所有用户到内存（包括用户名、加密密码等）
-// 注意：只加载用户数据，scraper实例将在initDefaultAccounts中使用密码重新登录获取
+// loadAllUsers 加载所有用户到内存（包括用户名、加密密码、cookie快照等）
+// scraper实例会在初始化阶段优先用已保存的cookie恢复，失败后再回退到密码重登。
 func (p *GyingPlugin) loadAllUsers() {
 	files, err := ioutil.ReadDir(StorageDir)
 	if err != nil {
@@ -913,7 +913,7 @@ func (p *GyingPlugin) loadAllUsers() {
 }
 
 // initDefaultAccounts 初始化所有账户（异步执行，不阻塞启动）
-// 包括：1. DefaultAccounts（代码配置）  2. 从文件加载的用户（使用加密密码重新登录）
+// 包括：1. DefaultAccounts（代码配置）  2. 从文件加载的用户（优先恢复cookie会话，失败后再使用加密密码重新登录）
 func (p *GyingPlugin) initDefaultAccounts() {
 	// fmt.Printf("[Gying] ========== 异步初始化所有账户 ==========\n")
 
@@ -970,6 +970,23 @@ func (p *GyingPlugin) initOrRestoreUser(username, password, source string) {
 			fmt.Printf("[Gying] 用户 %s scraper已存在，跳过\n", username)
 		}
 		return
+	}
+
+	if existingUser, exists := p.getUserByHash(hash); exists && existingUser.Cookie != "" {
+		scraper, err := p.createScraperWithCookies(existingUser.Cookie)
+		if err == nil {
+			existingUser.LastAccessAt = time.Now()
+			p.scrapers.Store(hash, scraper)
+			if err := p.saveUser(existingUser); err != nil && DebugLog {
+				fmt.Printf("[Gying] ⚠️  恢复用户 %s cookie会话后保存失败: %v\n", username, err)
+			}
+			fmt.Printf("[Gying] ✅ 账户 %s 会话恢复成功 (来源:%s, 使用已保存cookie)\n", username, source)
+			return
+		}
+
+		if DebugLog {
+			fmt.Printf("[Gying] ⚠️  账户 %s cookie会话恢复失败，回退到密码登录: %v\n", username, err)
+		}
 	}
 
 	// 登录
@@ -1030,6 +1047,24 @@ func (p *GyingPlugin) getUserByHash(hash string) (*User, bool) {
 func (p *GyingPlugin) saveUser(user *User) error {
 	p.users.Store(user.Hash, user)
 	return p.persistUser(user)
+}
+
+func (p *GyingPlugin) syncUserCookiesFromScraper(user *User, scraper *cloudscraper.Scraper) error {
+	if user == nil || scraper == nil {
+		return nil
+	}
+
+	cookieStr, err := p.exportCookies(scraper, p.getBaseURL())
+	if err != nil {
+		return err
+	}
+	if cookieStr == "" || cookieStr == user.Cookie {
+		return nil
+	}
+
+	user.Cookie = cookieStr
+	user.LastAccessAt = time.Now()
+	return p.saveUser(user)
 }
 
 // persistUser 持久化用户到文件
@@ -2092,6 +2127,11 @@ func (p *GyingPlugin) executeSearchTasks(users []*User, keyword string) []model.
 // searchWithScraperWithRetry 使用scraper搜索（带403自动重新登录重试）
 func (p *GyingPlugin) searchWithScraperWithRetry(keyword string, scraper *cloudscraper.Scraper, user *User) ([]model.SearchResult, error) {
 	results, err := p.searchWithScraper(keyword, scraper)
+	if err == nil {
+		if syncErr := p.syncUserCookiesFromScraper(user, scraper); syncErr != nil && DebugLog {
+			fmt.Printf("[Gying] ⚠️  搜索后同步用户 %s Cookie失败: %v\n", user.Username, syncErr)
+		}
+	}
 
 	// 检测是否为403错误
 	if err != nil && strings.Contains(err.Error(), "403") {
@@ -2125,6 +2165,9 @@ func (p *GyingPlugin) searchWithScraperWithRetry(keyword string, scraper *clouds
 		results, err = p.searchWithScraper(keyword, newScraper)
 		if err != nil {
 			return nil, fmt.Errorf("重新登录后搜索仍然失败: %w", err)
+		}
+		if syncErr := p.syncUserCookiesFromScraper(user, newScraper); syncErr != nil && DebugLog {
+			fmt.Printf("[Gying] ⚠️  重登搜索后同步用户 %s Cookie失败: %v\n", user.Username, syncErr)
 		}
 	}
 
